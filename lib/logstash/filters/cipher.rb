@@ -33,7 +33,7 @@ class LogStash::Filters::Cipher < LogStash::Filters::Base
   #
   # NOTE: If you encounter an error message at runtime containing the following:
   #
-  # "java.security.InvalidKeyException: Illegal key size: possibly you need to install 
+  # "java.security.InvalidKeyException: Illegal key size: possibly you need to install
   # Java Cryptography Extension (JCE) Unlimited Strength Jurisdiction Policy Files for your JRE"
   #
   # Please read the following: https://github.com/jruby/jruby/wiki/UnlimitedStrengthCrypto
@@ -45,7 +45,7 @@ class LogStash::Filters::Cipher < LogStash::Filters::Base
   # It depends of the cipher algorithm. If your key doesn't need
   # padding, don't set this parameter
   #
-  # Example, for AES-128, we must have 16 char long key. AES-256 = 32 chars 
+  # Example, for AES-128, we must have 16 char long key. AES-256 = 32 chars
   # [source,ruby]
   #     filter { cipher { key_size => 16 }
   #
@@ -113,6 +113,9 @@ class LogStash::Filters::Cipher < LogStash::Filters::Base
   #     filter { cipher { max_cipher_reuse => 1000 }}
   config :max_cipher_reuse, :validate => :number, :default => 1
 
+  #Add auth_data for gcm algorithm
+  config :auth_data, :validate => :string, :default => ""
+
   def register
     require 'base64' if @base64
     init_cipher
@@ -120,7 +123,6 @@ class LogStash::Filters::Cipher < LogStash::Filters::Base
 
 
   def filter(event)
-    
 
 
     #If decrypt or encrypt fails, we keep it it intact.
@@ -136,7 +138,15 @@ class LogStash::Filters::Cipher < LogStash::Filters::Base
       if @mode == "decrypt"
         data =  Base64.strict_decode64(data) if @base64 == true
         @random_iv = data.byteslice(0,@iv_random_length)
-        data = data.byteslice(@iv_random_length..data.length)
+
+        if @algorithm.include? "gcm"
+          auth_tag_length = 16
+          @cipher.auth_tag = data.byteslice(data.length-@iv_random_length..data.length)
+          data = data.byteslice(@iv_random_length..data.length-auth_tag_length-1)
+        else
+          data = data.byteslice(@iv_random_length..data.length)
+        end
+
       end
 
       if @mode == "encrypt"
@@ -145,18 +155,22 @@ class LogStash::Filters::Cipher < LogStash::Filters::Base
 
       @cipher.iv = @random_iv
 
-      result = @cipher.update(data) + @cipher.final
+      result = @cipher.update(data)+@cipher.final
 
       if @mode == "encrypt"
 
         # if we have a random_iv, prepend that to the crypted result
+
         if !@random_iv.nil?
           result = @random_iv + result
         end
-
+        if @algorithm.downcase.include? "gcm" or @algorithm.downcase.include? "ccm"
+          result = result + @cipher.auth_tag
+          @logger.debug("Cipher auth_tag length: ", :auth_tag_length => @cipher.auth_tag.length)
+        end
         result =  Base64.strict_encode64(result).encode("utf-8") if @base64 == true
       end
-
+      @logger.debug("Cipher algorithm: ", :algorithm => @algorithm)
     rescue => e
       @logger.warn("Exception catch on cipher filter", :event => event, :error => e)
 
@@ -210,6 +224,11 @@ class LogStash::Filters::Cipher < LogStash::Filters::Base
     @cipher.key = @key
 
     @cipher.padding = @cipher_padding if @cipher_padding
+
+    if @algorithm.downcase.include? "gcm"
+      @cipher.auth_data = @auth_data
+      @logger.debug("Cipher initialisation auth_data: ", :auth_data => @auth_data)
+    end
 
     @logger.debug("Cipher initialisation done", :mode => @mode, :key => @key, :iv_random_length => @iv_random_length, :iv_random => @iv_random, :cipher_padding => @cipher_padding)
   end # def init_cipher
